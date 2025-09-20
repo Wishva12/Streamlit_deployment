@@ -8,4 +8,5 @@ langchain_chroma
 langchainhub
 unstructured
 langchain_google_genai
+plotly
 -e .
