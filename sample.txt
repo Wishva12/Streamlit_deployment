@@ -1,0 +1,194 @@
+from flask import Flask, render_template, request, jsonify
+from src.helper import load_pdf_file, text_split, download_hugging_face_embeddings
+from dotenv import load_dotenv
+from langchain_community.vectorstores import Chroma
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain.chains import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate
+from werkzeug.utils import secure_filename
+import tempfile
+import shutil
+import os
+import pyttsx3
+import speech_recognition as sr
+import threading
+from datetime import datetime
+import webrtcvad
+import pyaudio
+
+app = Flask(__name__)
+load_dotenv()
+os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
+
+# Load data and setup
+extracted_data = load_pdf_file("Data/")
+embeddings = download_hugging_face_embeddings()
+text_chunks = text_split(extracted_data)
+
+vectorstore = Chroma.from_texts(texts=text_chunks, embedding=embeddings)
+retriever = vectorstore.as_retriever(
+    search_type="mmr",
+    search_kwargs={"k": 5, "fetch_k": 10, "lambda_mult": 0.5}
+)
+
+llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, max_tokens=75)
+system_prompt = "You are a helpful assistant. Answer the question based on the documents."
+
+prompt = ChatPromptTemplate.from_messages([
+    ("system", system_prompt),
+    ("human", "Context: {context}\n\nQuestion: {input}"),
+])
+
+qa_chain = create_stuff_documents_chain(llm, prompt)
+rag_chain = create_retrieval_chain(retriever, qa_chain)
+
+# TTS Setup
+engine = pyttsx3.init()
+is_bot_speaking = threading.Event()
+
+def configure_tts():
+    voices = engine.getProperty('voices')
+    for voice in voices:
+        if "female" in voice.name.lower():
+            engine.setProperty('voice', voice.id)
+            break
+    engine.setProperty('rate', 160)
+    engine.setProperty('volume', 0.9)
+
+configure_tts()
+
+# VAD and Audio Setup
+vad = webrtcvad.Vad(3)
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000
+FRAME_DURATION = 30
+FRAME_SIZE = int(RATE * FRAME_DURATION / 1000)
+
+p = pyaudio.PyAudio()
+stream = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=FRAME_SIZE)
+
+def speak_message(text):
+    print(f"Alex: {text}")
+    is_bot_speaking.set()
+    engine.say(text)
+    engine.runAndWait()
+    is_bot_speaking.clear()
+
+def wait_until_user_speaks():
+    print("Waiting for speech...")
+    while True:
+        try:
+            audio_frame = stream.read(FRAME_SIZE, exception_on_overflow=False)
+            if vad.is_speech(audio_frame, RATE):
+                return
+        except Exception as e:
+            print(f"VAD error: {e}")
+            continue
+
+def get_voice_input():
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        try:
+            wait_until_user_speaks()
+            print("User Speaking...")
+            audio = recognizer.listen(source, timeout=5)
+            text = recognizer.recognize_google(audio)
+            print(f"You (Voice): {text}")
+            return text.lower()
+        except sr.WaitTimeoutError:
+            print("No input detected.")
+            return ""
+        except sr.UnknownValueError:
+            print("Sorry, I couldn't understand that.")
+            return ""
+        except sr.RequestError as e:
+            print(f"SpeechRecognition error: {e}")
+            return ""
+
+def get_greeting():
+    hour = datetime.now().hour
+    if hour < 12:
+        return "Good morning"
+    elif hour < 18:
+        return "Good afternoon"
+    else:
+        return "Good evening"
+
+def gemini_response(input_text):
+    response = rag_chain.invoke({"input": input_text})
+    return response['answer']
+
+def start_voice_conversation():
+    greeting = f"{get_greeting()}, this is Alex from Abans Solar."
+    speak_message(greeting)
+
+    speak_message("Could I please have a moment to talk with you?")
+
+    user_response = get_voice_input()
+    if any(phrase in user_response for phrase in ["yes", "go ahead", "sure", "okay"]):
+        intro = gemini_response("Introduce solar energy products in a friendly way")
+        speak_message(intro)
+
+        while True:
+            user_input = get_voice_input()
+            if user_input:
+                if any(word in user_input for word in ["thank you", "not interested", "bye", "goodbye"]):
+                    speak_message("Thank you for your time! Wishing you a sunny day ahead.")
+                    break
+                elif any(word in user_input for word in ["busy", "later", "call back"]):
+                    speak_message("No worries. I'll get in touch another time. Take care!")
+                    break
+                else:
+                    reply = gemini_response(user_input)
+                    speak_message(reply)
+            else:
+                speak_message("I didn’t catch that. Could you repeat please?")
+    elif "no" in user_response:
+        speak_message("No problem! Wishing you a wonderful day.")
+    else:
+        speak_message("I’ll take that as a maybe. I’ll reach out later. Take care!")
+
+# Flask routes
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/get', methods=['POST'])
+def chat():
+    msg = request.form['msg']
+    response = rag_chain.invoke({"input": msg})
+    return str(response["answer"])
+
+@app.route('/train', methods=['POST'])
+def train_context():
+    if 'file' not in request.files:
+        return jsonify({"status": "error", "message": "No file uploaded"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"status": "error", "message": "Empty file"}), 400
+
+    try:
+        temp_dir = tempfile.mkdtemp()
+        file_path = os.path.join(temp_dir, secure_filename(file.filename))
+        file.save(file_path)
+
+        new_docs = load_pdf_file(data=temp_dir)
+        chunks = text_split(new_docs)
+        vectorstore.add_documents(new_docs)
+
+        shutil.rmtree(temp_dir)
+
+        return jsonify({"status": "success", "message": f"✅ Trained with '{file.filename}'."})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/start-voice', methods=['POST'])
+def start_voice():
+    threading.Thread(target=start_voice_conversation).start()
+    return jsonify({"status": "started"}), 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080, debug=True)

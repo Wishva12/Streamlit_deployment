@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>AI Chat Bot</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: 'Segoe UI', sans-serif;
+      background-color: #f0f2f5;
+    }
+
+    .chat-container {
+      width: 400px;
+      max-width: 100%;
+      margin: 50px auto;
+      border: 1px solid #ccc;
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+      display: flex;
+      flex-direction: column;
+      height: 600px;
+    }
+
+    .chat-header {
+      background-color: #7c3aed;
+      color: white;
+      padding: 15px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .chat-header img {
+      width: 35px;
+      height: 35px;
+      border-radius: 50%;
+    }
+
+    .chat-header span {
+      font-weight: bold;
+      font-size: 16px;
+    }
+
+    .chat-body {
+      flex: 1;
+      background-color: white;
+      padding: 20px;
+      overflow-y: auto;
+    }
+
+    .message {
+      max-width: 85%;
+      margin-bottom: 15px;
+      padding: 12px;
+      border-radius: 15px;
+      line-height: 1.4;
+    }
+
+    .bot-message {
+      background-color: #f1f2f6;
+      align-self: flex-start;
+    }
+
+    .user-message {
+      background-color: #e0dcff;
+      align-self: flex-end;
+      color: #3d1eb3;
+      font-weight: 500;
+    }
+
+    .chat-footer {
+      display: flex;
+      padding: 10px;
+      border-top: 1px solid #ddd;
+      gap: 10px;
+    }
+
+    .chat-footer input {
+      flex: 1;
+      padding: 12px;
+      border: 1px solid #ccc;
+      border-radius: 25px;
+      outline: none;
+    }
+
+    .chat-footer button {
+      background-color: #7c3aed;
+      color: white;
+      border: none;
+      border-radius: 50%;
+      width: 40px;
+      height: 40px;
+      cursor: pointer;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .chat-footer button:hover {
+      background-color: #5a2bc9;
+    }
+  </style>
+</head>
+<body>
+
+<div class="chat-container">
+  <div class="chat-header">
+    <img src="https://cdn-icons-png.flaticon.com/512/4712/4712106.png" alt="Bot">
+    <span>Lead-Collection</span>
+    <span style="color: lightgreen; font-size: 12px;">● Online</span>
+  </div>
+
+  <div class="chat-body" id="chat-body">
+    <div class="message bot-message">
+      👋🏽Hi, I'm Alex. How can I assist you?
+    </div>
+  </div>
+
+  <div class="chat-footer">
+    <input type="text" id="userInput" placeholder="Type your message..." />
+    <button onclick="sendMessage()">➤</button>
+    <button onclick="startVoiceConversation()">🎤</button>
+  </div>
+</div>
+
+<script>
+  const chatBody = document.getElementById("chat-body");
+  const userInput = document.getElementById("userInput");
+
+  function appendMessage(content, className) {
+    const msgDiv = document.createElement("div");
+    msgDiv.className = "message " + className;
+    msgDiv.innerHTML = content;
+    chatBody.appendChild(msgDiv);
+    chatBody.scrollTop = chatBody.scrollHeight;
+  }
+
+  function sendMessage() {
+    const message = userInput.value.trim();
+    if (!message) return;
+
+    appendMessage(message, "user-message");
+    userInput.value = "";
+
+    fetch("/get", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: "msg=" + encodeURIComponent(message)
+    })
+    .then(response => response.text())
+    .then(data => {
+      appendMessage(data, "bot-message");
+    });
+  }
+
+  userInput.addEventListener("keypress", function (e) {
+    if (e.key === "Enter") sendMessage();
+  });
+
+  function startVoiceConversation() {
+    appendMessage("🎤 Starting voice assistant call...", "bot-message");
+    fetch("/start_voice", {
+      method: "POST"
+    })
+    .then(res => res.json())
+    .then(data => {
+      console.log("Voice conversation started:", data);
+    })
+    .catch(err => {
+      console.error("Voice start failed:", err);
+      appendMessage("❌ Voice conversation failed to start.", "bot-message");
+    });
+  }
+</script>
+
+</body>
+</html>
+

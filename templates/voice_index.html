@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice AI Chat</title>
+</head>
+<body style="text-align:center; font-family:sans-serif;">
+    <h1>🎤 Voice Chat with Alex</h1>
+    <button onclick="startVoiceChat()" style="font-size:20px; padding:10px;">🎙️ Speak</button>
+    <p id="question"></p>
+    <p><strong>Alex:</strong> <span id="response"></span></p>
+
+    <script>
+        function speakText(text) {
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.lang = 'en-US';
+            utterance.rate = 1;
+            window.speechSynthesis.speak(utterance);
+        }
+
+        function startVoiceChat() {
+            fetch("/voice", { method: "POST" })
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById("question").innerText = "You: " + data.question;
+                    document.getElementById("response").innerText = data.response;
+                    speakText(data.response);  // Speak from browser
+                });
+        }
+    </script>
+</body>
+</html>
