@@ -8,25 +8,28 @@ import pyaudio
 import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
-from langchain_community.vectorstores import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
-import tempfile
 import os
 import shutil
 import tkinter.messagebox as messagebox
 
 from src.helper import load_pdf_file, text_split, download_embeddings
 
+# Load API key
 load_dotenv()
 os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
 # Setup LLM and prompt
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", temperature=0.3, max_tokens=75)
 system_prompt = "You are a helpful assistant. Answer the question based on the documents."
-prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", "Context: {context}\n\nQuestion: {input}")])
+prompt = ChatPromptTemplate.from_messages([
+    ("system", system_prompt),
+    ("human", "Context: {context}\n\nQuestion: {input}")
+])
 
 # Global variables
 embeddings = download_embeddings()
@@ -34,7 +37,6 @@ vectorstore = None
 retriever = None
 conversation_memory = []
 is_bot_speaking = threading.Event()
-
 
 # Voice setup
 engine = pyttsx3.init()
@@ -81,7 +83,6 @@ def gemini_response(input_text):
     response = rag_chain.invoke({"input": input_text})
     return response['answer']
 
-
 def run_conversation():
     update_status(True)
     speak_message(f"{get_greeting()}, this is Alex.")
@@ -113,7 +114,6 @@ def run_conversation():
                     return
                 else:
                     speak_message("I didn't quite catch that. Do you want to continue our conversation?")
-
             else:
                 speak_message("Are you still there? I'd be happy to continue our conversation.")
 
@@ -123,17 +123,18 @@ def upload_and_train():
     file_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
     if file_path:
         try:
-            shutil.rmtree("Data/")  
+            # Clear old data and copy new PDF
+            shutil.rmtree("Data/", ignore_errors=True)  
             os.makedirs("Data/", exist_ok=True)
             new_pdf_path = os.path.join("Data/", os.path.basename(file_path))
             shutil.copy(file_path, new_pdf_path)
 
-            
+            # Load and split PDF
             extracted_data = load_pdf_file("Data/")
             text_chunks = text_split(extracted_data)
 
-            
-            vectorstore = Chroma.from_texts(texts=text_chunks, embedding=embeddings)
+            # Build FAISS vectorstore
+            vectorstore = FAISS.from_documents(documents=text_chunks, embedding=embeddings)
             retriever = vectorstore.as_retriever(
                 search_type="mmr",
                 search_kwargs={"k": 5, "fetch_k": 10, "lambda_mult": 0.5, "score_threshold": 0.7}
@@ -142,8 +143,6 @@ def upload_and_train():
             messagebox.showinfo("Success", "Successfully trained on new PDF. Previous context cleared.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to process PDF: {str(e)}")
-
-
 
 def update_status(active):
     if active:
@@ -158,7 +157,7 @@ def blink_icon():
         phone_icon.config(fg="green" if current_color == "black" else "black")
     root.after(500, blink_icon)
 
-
+# Tkinter UI
 root = tk.Tk()
 root.title("Voice AI Bot - Alex")
 root.geometry("400x350")
@@ -176,4 +175,3 @@ start_button.pack(pady=10)
 
 blink_icon()
 root.mainloop()
-
