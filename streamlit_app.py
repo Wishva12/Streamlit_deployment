@@ -15,7 +15,7 @@ import plotly.graph_objects as go
 
 # Conditional import for AI chat engine with FAISS fallback
 try:
-    from ai_chat_engine_faiss import AIProductChatEngine, StreamlitChatInterface
+    from ai_chat_engine import AIProductChatEngine, StreamlitChatInterface
     AI_CHAT_AVAILABLE = True
     AI_CHAT_TYPE = "FAISS"
 except ImportError as e:
