@@ -14,7 +14,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 
-from ai_chat_engine import AIProductChatEngine, StreamlitChatInterface
+#from ai_chat_engine import AIProductChatEngine, StreamlitChatInterface
 
 load_dotenv()
 
