@@ -1,6 +1,7 @@
-# ai_chat_engine_sinhala.py
+# ai_chat_engine_faiss.py - FAISS implementation replacing ChromaDB
 import os
 import logging
+import pickle
 from typing import List, Dict, Optional
 from datetime import datetime
 import streamlit as st
@@ -10,13 +11,13 @@ from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS  # Changed from Chroma to FAISS
 from dotenv import load_dotenv
 import sqlite3
 import uuid
 import shutil
 import glob
-from googletrans import Translator # <<< MODIFIED: Import Translator
+from googletrans import Translator
 
 # Load environment variables
 load_dotenv()
@@ -26,7 +27,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# <<< NEW SECTION: Translation Service >>>
+# Translation Service (unchanged)
 class TranslationService:
     """
     A service to handle language detection and translation using Googletrans.
@@ -61,21 +62,18 @@ class TranslationService:
 
 
 class AIProductChatEngine:
-    # --- No changes needed in this class ---
-    # It will continue to operate purely in English,
-    # blissfully unaware of the translation happening outside.
     """
     Professional AI Chat Engine for Product Consultation
-    Integrates RAG with Google Gemini for contextual responses
+    Integrates RAG with Google Gemini and FAISS for contextual responses
     """
     
-    def __init__(self, pdf_path: str = None, persist_directory: str = "chroma_db", data_folder: str = "Data"):
+    def __init__(self, pdf_path: str = None, persist_directory: str = "faiss_db", data_folder: str = "Data"):
         """
         Initialize the AI Chat Engine
         
         Args:
             pdf_path: Path to product knowledge PDF
-            persist_directory: Directory to persist vector store
+            persist_directory: Directory to persist FAISS vector store
             data_folder: Folder containing PDF files
         """
         self.pdf_path = pdf_path or "product_knowledge.pdf"
@@ -85,13 +83,17 @@ class AIProductChatEngine:
         self.rag_chain = None
         self.chat_history = []
         
+        # FAISS-specific paths
+        self.faiss_index_path = os.path.join(persist_directory, "index.faiss")
+        self.faiss_pkl_path = os.path.join(persist_directory, "index.pkl")
+        
         # Initialize components
         self._setup_embeddings()
         self._setup_vectorstore()
         self._setup_llm()
         self._setup_rag_chain()
         
-        logger.info("AI Chat Engine initialized successfully")
+        logger.info("AI Chat Engine initialized successfully with FAISS")
     
     def _setup_embeddings(self):
         """Setup Google Generative AI embeddings"""
@@ -126,18 +128,18 @@ class AIProductChatEngine:
                 logger.info("No PDF files found in data folder")
                 return False
             
-            # If vector store doesn't exist, we need to create it
-            if not os.path.exists(self.persist_directory):
-                logger.info("Vector store doesn't exist, will create new one")
+            # If FAISS index doesn't exist, we need to create it
+            if not os.path.exists(self.faiss_index_path) or not os.path.exists(self.faiss_pkl_path):
+                logger.info("FAISS index doesn't exist, will create new one")
                 return True
             
-            # Check modification times of PDFs vs vector store
-            vectorstore_time = os.path.getmtime(self.persist_directory)
+            # Check modification times of PDFs vs FAISS index
+            faiss_time = min(os.path.getmtime(self.faiss_index_path), os.path.getmtime(self.faiss_pkl_path))
             
             for pdf_file in pdf_files:
                 pdf_time = os.path.getmtime(pdf_file)
-                if pdf_time > vectorstore_time:
-                    logger.info(f"PDF file '{pdf_file}' is newer than vector store")
+                if pdf_time > faiss_time:
+                    logger.info(f"PDF file '{pdf_file}' is newer than FAISS index")
                     return True
             
             logger.info("No PDF updates detected")
@@ -148,35 +150,41 @@ class AIProductChatEngine:
             return True  # Rebuild on error to be safe
     
     def _setup_vectorstore(self):
-        """Setup or load existing vector store"""
+        """Setup or load existing FAISS vector store"""
         try:
             # Check if we need to rebuild the vector store
             needs_rebuild = self._check_for_pdf_updates()
             
             if needs_rebuild:
-                logger.info("Rebuilding vector store with updated PDFs...")
+                logger.info("Rebuilding FAISS vector store with updated PDFs...")
                 # Remove existing vector store
                 if os.path.exists(self.persist_directory):
                     shutil.rmtree(self.persist_directory)
-                    logger.info("Removed existing vector store")
+                    logger.info("Removed existing FAISS index")
                 
                 # Create new vector store from PDFs
                 self._create_vectorstore_from_pdfs()
             else:
-                logger.info("Loading existing vector store...")
-                self.vectorstore = Chroma(
-                    persist_directory=self.persist_directory,
-                    embedding_function=self.embeddings
+                logger.info("Loading existing FAISS vector store...")
+                # Load existing FAISS index
+                self.vectorstore = FAISS.load_local(
+                    self.persist_directory, 
+                    self.embeddings,
+                    allow_dangerous_deserialization=True
                 )
+                logger.info("FAISS vector store loaded successfully")
                 
         except Exception as e:
-            logger.error(f"Vector store setup failed: {e}")
+            logger.error(f"FAISS vector store setup failed: {e}")
             # Fallback: create empty vectorstore
             self._create_fallback_vectorstore()
     
     def _create_vectorstore_from_pdfs(self):
-        """Create vector store from all PDF files in the data folder"""
+        """Create FAISS vector store from all PDF files in the data folder"""
         try:
+            # Create persist directory if it doesn't exist
+            os.makedirs(self.persist_directory, exist_ok=True)
+            
             # Get all PDF files from data folder
             pdf_files = glob.glob(os.path.join(self.data_folder, "*.pdf"))
             
@@ -213,44 +221,57 @@ class AIProductChatEngine:
             )
             docs = text_splitter.split_documents(all_documents)
             
-            # Create vector store
-            self.vectorstore = Chroma.from_documents(
+            # Create FAISS vector store
+            self.vectorstore = FAISS.from_documents(
                 documents=docs,
-                embedding=self.embeddings,
-                persist_directory=self.persist_directory
+                embedding=self.embeddings
             )
             
-            logger.info(f"Vector store created with {len(docs)} document chunks from {len(pdf_files)} PDF files")
+            # Save FAISS index to disk
+            self.vectorstore.save_local(self.persist_directory)
+            
+            logger.info(f"FAISS vector store created with {len(docs)} document chunks from {len(pdf_files)} PDF files")
             
         except Exception as e:
-            logger.error(f"Failed to create vector store from PDFs: {e}")
+            logger.error(f"Failed to create FAISS vector store from PDFs: {e}")
             self._create_fallback_vectorstore()
     
     def _create_fallback_vectorstore(self):
-        """Create fallback vector store with product knowledge"""
+        """Create fallback FAISS vector store with product knowledge"""
         try:
+            # Create persist directory if it doesn't exist
+            os.makedirs(self.persist_directory, exist_ok=True)
+            
             # Fallback product knowledge
             fallback_docs = [
                 "Mobitel Premium Package: Rs.2999/month, 100GB Data, Unlimited Calls, Free Netflix, Free Spotify, 5G Ready",
                 "Mobitel Family Package: Rs.4999/month, 300GB Shared Data, 5 SIM Cards, Disney+ & Netflix, Parental Controls",
                 "Mobitel Business Package: Rs.7999/month, Unlimited Data, Priority Network, 24/7 Support, Cloud Storage",
                 "All packages include island-wide coverage, no contract commitment, 30-day money-back guarantee",
-                "Mobitel offers the best network coverage in Sri Lanka with 95% 4G coverage nationwide"
+                "Mobitel offers the best network coverage in Sri Lanka with 95% 4G coverage nationwide",
+                "Customer support available 24/7 via phone (123), email, and live chat",
+                "All packages support 5G technology where available in Colombo, Kandy, and major cities",
+                "International roaming available in 200+ countries with competitive rates",
+                "Family package allows sharing data across 5 SIM cards with parental controls",
+                "Business package includes priority customer support and dedicated account manager"
             ]
             
             from langchain.schema import Document
             docs = [Document(page_content=content) for content in fallback_docs]
             
-            self.vectorstore = Chroma.from_documents(
+            # Create FAISS vector store from fallback docs
+            self.vectorstore = FAISS.from_documents(
                 documents=docs,
-                embedding=self.embeddings,
-                persist_directory=self.persist_directory
+                embedding=self.embeddings
             )
             
-            logger.info("Fallback vector store created successfully")
+            # Save FAISS index to disk
+            self.vectorstore.save_local(self.persist_directory)
+            
+            logger.info("Fallback FAISS vector store created successfully")
             
         except Exception as e:
-            logger.error(f"Failed to create fallback vector store: {e}")
+            logger.error(f"Failed to create fallback FAISS vector store: {e}")
             raise
     
     def _setup_llm(self):
@@ -259,7 +280,7 @@ class AIProductChatEngine:
             self.llm = ChatGoogleGenerativeAI(
                 model="gemini-1.5-flash",
                 temperature=0.3,
-                max_tokens=200,  # Increased for better responses
+                max_tokens=200,
                 google_api_key=os.getenv("GOOGLE_API_KEY")
             )
             logger.info("LLM initialized successfully")
@@ -271,17 +292,15 @@ class AIProductChatEngine:
     def _setup_rag_chain(self):
         """Setup RAG chain for question answering"""
         try:
-            # Setup retriever with optimized parameters
+            # Setup retriever with optimized parameters for FAISS
             self.retriever = self.vectorstore.as_retriever(
-                search_type="mmr",
+                search_type="mmr",  # Maximum Marginal Relevance
                 search_kwargs={
-                    "k": 5,
-                    "fetch_k": 10,
-                    "lambda_mult": 0.5,
-                    "score_threshold": 0.3  # Lowered threshold for better retrieval
+                    "k": 5,  # Number of documents to retrieve
+                    "fetch_k": 10,  # Number of documents to fetch before MMR
+                    "lambda_mult": 0.5,  # Diversity parameter for MMR
                 }
             )
-            
             
             # Enhanced system prompt for better responses
             system_prompt = (
@@ -300,10 +319,10 @@ class AIProductChatEngine:
             ])
             
             # Create chains
-            Youtube_chain = create_stuff_documents_chain(self.llm, self.prompt)
-            self.rag_chain = create_retrieval_chain(self.retriever, Youtube_chain)
+            document_chain = create_stuff_documents_chain(self.llm, self.prompt)
+            self.rag_chain = create_retrieval_chain(self.retriever, document_chain)
             
-            logger.info("RAG chain setup completed")
+            logger.info("RAG chain setup completed with FAISS")
             
         except Exception as e:
             logger.error(f"Failed to setup RAG chain: {e}")
@@ -311,16 +330,16 @@ class AIProductChatEngine:
     
     def force_reload_vectorstore(self):
         """
-        Force reload of vector store from PDFs
+        Force reload of FAISS vector store from PDFs
         Call this method when you want to manually refresh the knowledge base
         """
         try:
-            logger.info("Force reloading vector store...")
+            logger.info("Force reloading FAISS vector store...")
             
             # Remove existing vector store
             if os.path.exists(self.persist_directory):
                 shutil.rmtree(self.persist_directory)
-                logger.info("Removed existing vector store")
+                logger.info("Removed existing FAISS vector store")
             
             # Recreate vector store
             self._create_vectorstore_from_pdfs()
@@ -328,12 +347,65 @@ class AIProductChatEngine:
             # Recreate RAG chain
             self._setup_rag_chain()
             
-            logger.info("Vector store force reload completed")
+            logger.info("FAISS vector store force reload completed")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to force reload vector store: {e}")
+            logger.error(f"Failed to force reload FAISS vector store: {e}")
             return False
+    
+    def add_documents_to_vectorstore(self, documents: List[str]):
+        """
+        Add new documents to existing FAISS vector store
+        
+        Args:
+            documents: List of text documents to add
+        """
+        try:
+            from langchain.schema import Document
+            docs = [Document(page_content=content) for content in documents]
+            
+            # Add documents to existing vector store
+            self.vectorstore.add_documents(docs)
+            
+            # Save updated index
+            self.vectorstore.save_local(self.persist_directory)
+            
+            logger.info(f"Added {len(documents)} documents to FAISS vector store")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to add documents to FAISS vector store: {e}")
+            return False
+    
+    def search_similar_documents(self, query: str, k: int = 5):
+        """
+        Search for similar documents in the vector store
+        
+        Args:
+            query: Search query
+            k: Number of results to return
+            
+        Returns:
+            List of similar documents with scores
+        """
+        try:
+            # Perform similarity search with scores
+            docs_with_scores = self.vectorstore.similarity_search_with_score(query, k=k)
+            
+            results = []
+            for doc, score in docs_with_scores:
+                results.append({
+                    'content': doc.page_content,
+                    'score': float(score),
+                    'metadata': doc.metadata
+                })
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            return []
     
     def chat(self, user_input: str, customer_name: str = "Customer") -> Dict[str, str]:
         """
@@ -433,6 +505,23 @@ class AIProductChatEngine:
         except Exception as e:
             logger.error(f"Database save error: {e}")
     
+    def get_vectorstore_info(self):
+        """Get information about the FAISS vector store"""
+        try:
+            if self.vectorstore:
+                # Get the number of documents in the vector store
+                index_size = self.vectorstore.index.ntotal
+                return {
+                    'total_documents': index_size,
+                    'index_type': 'FAISS',
+                    'embedding_dimension': self.vectorstore.index.d,
+                    'index_path': self.persist_directory
+                }
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get vectorstore info: {e}")
+            return None
+    
     def get_conversation_summary(self) -> Dict[str, int]:
         """Get conversation statistics"""
         return {
@@ -447,7 +536,7 @@ class AIProductChatEngine:
         logger.info("Conversation history cleared")
 
 
-# Streamlit Chat Interface Component
+# Streamlit Chat Interface Component (unchanged except for some FAISS-specific features)
 class StreamlitChatInterface:
     """
     Streamlit-specific chat interface component
@@ -455,7 +544,7 @@ class StreamlitChatInterface:
     
     def __init__(self, chat_engine: AIProductChatEngine):
         self.chat_engine = chat_engine
-        self.translator = TranslationService() # <<< MODIFIED: Initialize translator
+        self.translator = TranslationService()
         self._initialize_session_state()
     
     def _initialize_session_state(self):
@@ -472,7 +561,7 @@ class StreamlitChatInterface:
         if not st.session_state.chat_messages:
             # Add a welcome message from the assistant
             initial_message = """
-            Hello! I am ALEX, from Mobitel. We are introducing new packeges as you recognizing as a valuable customer.
+            Hello! I am ALEX, from Mobitel. We are introducing new packages as you recognizing as a valuable customer.
 
 Here are some of our popular packages:
 * **Mobitel Premium Package:** Our flagship plan with 100GB Data, unlimited calls, and free streaming subscriptions.
@@ -481,14 +570,14 @@ Here are some of our popular packages:
 
 Wanna try out these?
 """
-            # <<< MODIFIED: Translate the initial message to Sinhala for a better user experience >>>
+            # Translate the initial message to Sinhala for a better user experience
             sinhala_initial_message, _ = self.translator.translate(initial_message, 'si')
             
             st.session_state.chat_messages.append({
                 "role": "assistant",
-                "content": sinhala_initial_message, # Use translated message
+                "content": sinhala_initial_message,
                 "timestamp": datetime.now().strftime("%H:%M:%S"),
-                "context_docs": 3  # Indicate that the information is from our knowledge base
+                "context_docs": 3
             })
             
     def render_chat_interface(self, customer_name: str = "Customer"):
@@ -499,8 +588,13 @@ Wanna try out these?
             customer_name: Customer's name for personalization
         """
         # Chat header
-        st.markdown("### 🤖 ALEX AI - Product Consultant")
+        st.markdown("### 🤖 ALEX AI - Product Consultant (FAISS Powered)")
         st.markdown(f"*Chatting with: {customer_name}*")
+        
+        # Show vectorstore info
+        vectorstore_info = self.chat_engine.get_vectorstore_info()
+        if vectorstore_info:
+            st.caption(f"📚 Knowledge Base: {vectorstore_info['total_documents']} documents indexed with FAISS")
         
         # Chat container
         chat_container = st.container()
@@ -513,7 +607,6 @@ Wanna try out these?
                     if message["role"] == "assistant" and "timestamp" in message:
                         st.caption(f"⏱️ {message['timestamp']}")
         
-        # <<< MODIFIED: Update placeholder text >>>
         if prompt := st.chat_input("අපගේ මොබිටෙල් පැකේජ ගැන විමසන්න... (Ask about our packages...)"):
             self._handle_user_input(prompt, customer_name, chat_container)
     
@@ -532,7 +625,7 @@ Wanna try out these?
         
         # Get AI response
         with st.spinner("ALEX හිතනවා... (ALEX is thinking...)"):
-            # <<< MODIFIED: Translation Logic >>>
+            # Translation Logic
             # 1. Translate user input to English
             english_input, source_lang = self.translator.translate(user_input, 'en')
             logger.info(f"Detected language: {source_lang}. Translated query to: '{english_input}'")
@@ -545,11 +638,10 @@ Wanna try out these?
             if source_lang != 'en':
                 final_response, _ = self.translator.translate(english_response, source_lang)
             else:
-                final_response = english_response # No need to translate back
+                final_response = english_response
             
             # Update the response content with the final translated version
             response_data['response'] = final_response
-            # <<< END OF MODIFICATION >>>
 
         # Add AI response to chat history
         st.session_state.chat_messages.append({
@@ -582,13 +674,31 @@ Wanna try out these?
             
             # Force reload vector store button
             if st.button("🔄 Reload Knowledge Base"):
-                with st.spinner("Reloading knowledge base..."):
+                with st.spinner("Reloading FAISS knowledge base..."):
                     success = self.chat_engine.force_reload_vectorstore()
                 if success:
-                    st.success("Knowledge base reloaded successfully!")
+                    st.success("FAISS knowledge base reloaded successfully!")
                 else:
-                    st.error("Failed to reload knowledge base!")
+                    st.error("Failed to reload FAISS knowledge base!")
                 st.rerun()
+            
+            # FAISS-specific features
+            st.markdown("### 🔍 FAISS Search")
+            search_query = st.text_input("Search knowledge base:")
+            if search_query and st.button("Search"):
+                results = self.chat_engine.search_similar_documents(search_query)
+                for i, result in enumerate(results[:3]):
+                    st.markdown(f"**Result {i+1}** (Score: {result['score']:.3f})")
+                    st.markdown(result['content'][:200] + "...")
+                    st.markdown("---")
+            
+            # Vectorstore info
+            vectorstore_info = self.chat_engine.get_vectorstore_info()
+            if vectorstore_info:
+                st.markdown("### 📊 Vector Store Info")
+                st.metric("Total Documents", vectorstore_info['total_documents'])
+                st.metric("Embedding Dimension", vectorstore_info['embedding_dimension'])
+                st.caption(f"Index Type: {vectorstore_info['index_type']}")
             
             # Chat statistics
             if st.session_state.chat_messages:
@@ -625,21 +735,21 @@ Wanna try out these?
 def main():
     """Main function for standalone testing"""
     st.set_page_config(
-        page_title="AI Chat Interface",
+        page_title="AI Chat Interface - FAISS",
         page_icon="🤖",
         layout="wide"
     )
     
     # Initialize chat engine
     if 'chat_engine' not in st.session_state:
-        with st.spinner("Initializing AI Chat Engine..."):
+        with st.spinner("Initializing AI Chat Engine with FAISS..."):
             st.session_state.chat_engine = AIProductChatEngine()
     
     # Initialize chat interface
     chat_interface = StreamlitChatInterface(st.session_state.chat_engine)
     
     # Render interface
-    st.title("🤖 ALEX with you")
+    st.title("🤖 ALEX with you (FAISS Edition)")
     
     # Customer name input
     customer_name = st.text_input("Customer Name", value="John Doe")
